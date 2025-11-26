@@ -35,7 +35,7 @@ public class AppProperties {
     @Validated
     public static class DataProperties {
         @NotBlank
-        private String filePath;
+        private String filePath = "classpath:data/news_data.json";
 
         private boolean bootstrapEnabled = true;
 
@@ -58,14 +58,18 @@ public class AppProperties {
 
     @Validated
     public static class LlmProperties {
-        @NotBlank
-        private String provider;
+        private static final String DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434";
+        private static final String DEFAULT_OLLAMA_PROVIDER = "ollama";
+        private static final String DEFAULT_OLLAMA_MODEL = "llama3.1";
 
         @NotBlank
-        private String model;
+        private String provider = DEFAULT_OLLAMA_PROVIDER;
 
         @NotBlank
-        private String baseUrl;
+        private String model = DEFAULT_OLLAMA_MODEL;
+
+        @NotBlank
+        private String baseUrl = DEFAULT_OLLAMA_BASE_URL;
 
         private String apiKey;
 
@@ -81,7 +85,11 @@ public class AppProperties {
         }
 
         public void setProvider(String provider) {
-            this.provider = provider;
+            if (provider == null || provider.isBlank()) {
+                this.provider = DEFAULT_OLLAMA_PROVIDER;
+            } else {
+                this.provider = provider;
+            }
         }
 
         public String getModel() {
@@ -89,7 +97,11 @@ public class AppProperties {
         }
 
         public void setModel(String model) {
-            this.model = model;
+            if (model == null || model.isBlank()) {
+                this.model = DEFAULT_OLLAMA_MODEL;
+            } else {
+                this.model = model;
+            }
         }
 
         public String getBaseUrl() {
@@ -97,7 +109,21 @@ public class AppProperties {
         }
 
         public void setBaseUrl(String baseUrl) {
-            this.baseUrl = baseUrl;
+            if (baseUrl == null || baseUrl.isBlank()) {
+                this.baseUrl = null;
+            } else {
+                this.baseUrl = baseUrl;
+            }
+        }
+
+        public String getResolvedBaseUrl() {
+            if (baseUrl != null && !baseUrl.isBlank()) {
+                return baseUrl;
+            }
+            if ("ollama".equalsIgnoreCase(provider)) {
+                return DEFAULT_OLLAMA_BASE_URL;
+            }
+            return baseUrl;
         }
 
         public String getApiKey() {
@@ -121,7 +147,8 @@ public class AppProperties {
                 return false;
             }
             if ("ollama".equalsIgnoreCase(provider)) {
-                return baseUrl != null && !baseUrl.isBlank();
+                String resolvedBaseUrl = getResolvedBaseUrl();
+                return resolvedBaseUrl != null && !resolvedBaseUrl.isBlank();
             }
             return apiKey != null && !apiKey.isBlank();
         }

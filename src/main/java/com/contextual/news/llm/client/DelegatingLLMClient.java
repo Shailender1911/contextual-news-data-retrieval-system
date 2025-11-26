@@ -50,8 +50,8 @@ public class DelegatingLLMClient implements LLMClient {
     @Override
     @Cacheable(value = "query-understanding", key = "#context.query() + ':' + #context.latitude() + ':' + #context.longitude()")
     public ParsedQuery parseQuery(QueryUnderstandingContext context) {
-        log.debug("LLM configuration resolved: provider={}, baseUrl={}, enabledFlag={}, isEnabledComputed={}",
-            properties.llm().getProvider(), properties.llm().getBaseUrl(), properties.llm().isEnabled(),
+        log.info("LLM configuration resolved: provider={}, baseUrl={}, enabledFlag={}, isEnabledComputed={}",
+            properties.llm().getProvider(), properties.llm().getResolvedBaseUrl(), properties.llm().isEnabled(),
             isProviderEnabled());
         if (!isProviderEnabled()) {
             log.info("LLM disabled or provider configuration missing; using rule-based parser");
@@ -152,21 +152,29 @@ public class DelegatingLLMClient implements LLMClient {
         if (raw == null || raw.isBlank()) {
             return null;
         }
-        try {
-            return objectMapper.readTree(raw);
-                    } catch (Exception ex) {
-            log.warn("Failed to parse LLM content as JSON: {}", raw, ex);
-            return null;
+        JsonNode parsed = tryParseJson(raw);
+        if (parsed != null) {
+            return parsed;
         }
+        String sanitized = sanitizeResponse(raw);
+        if (sanitized != null && !sanitized.equals(raw)) {
+            parsed = tryParseJson(sanitized);
+            if (parsed != null) {
+                return parsed;
+            }
+        }
+        log.warn("Failed to parse LLM content as JSON even after sanitization; falling back. Raw response:\n{}", raw);
+        return null;
     }
 
     private String executeForString(PromptParts prompt, ObjectNode schema) {
+        String baseUrl = properties.llm().getResolvedBaseUrl();
         if (isOllama()) {
-            log.info("Calling Ollama /api/chat at {}", properties.llm().getBaseUrl());
+            log.info("Calling Ollama /api/chat at {}", baseUrl);
             JsonNode response = callOllamaChat(prompt);
             return extractOllamaContent(response);
         }
-        log.info("Calling OpenAI-compatible /responses endpoint at {}", properties.llm().getBaseUrl());
+        log.info("Calling OpenAI-compatible /responses endpoint at {}", baseUrl);
         JsonNode response = callOpenAi(buildOpenAiRequest(prompt, schema));
         return extractOpenAiContent(response);
     }
@@ -193,10 +201,49 @@ public class DelegatingLLMClient implements LLMClient {
             return false;
         }
         if (PROVIDER_OLLAMA.equalsIgnoreCase(provider)) {
-            return llm.getBaseUrl() != null && !llm.getBaseUrl().isBlank();
+            String baseUrl = llm.getResolvedBaseUrl();
+            return baseUrl != null && !baseUrl.isBlank();
         }
-        return llm.getBaseUrl() != null && !llm.getBaseUrl().isBlank()
+        String baseUrl = llm.getResolvedBaseUrl();
+        return baseUrl != null && !baseUrl.isBlank()
             && llm.getApiKey() != null && !llm.getApiKey().isBlank();
+    }
+
+    private JsonNode tryParseJson(String payload) {
+        try {
+            return objectMapper.readTree(payload);
+        } catch (Exception ex) {
+            log.debug("Unable to parse payload as JSON on first attempt: {}", ex.getMessage());
+            return null;
+        }
+    }
+
+    private String sanitizeResponse(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String trimmed = raw.trim();
+        if (trimmed.startsWith("```")) {
+            trimmed = trimmed.replace("```json", "")
+                .replace("```JSON", "")
+                .replace("```", "")
+                .trim();
+        }
+        int firstBrace = trimmed.indexOf('{');
+        int firstBracket = trimmed.indexOf('[');
+        int start = -1;
+        int end = -1;
+        if (firstBrace >= 0 && (firstBracket < 0 || firstBrace < firstBracket)) {
+            start = firstBrace;
+            end = trimmed.lastIndexOf('}');
+        } else if (firstBracket >= 0) {
+            start = firstBracket;
+            end = trimmed.lastIndexOf(']');
+        }
+        if (start >= 0 && end >= start) {
+            return trimmed.substring(start, end + 1);
+        }
+        return trimmed;
     }
 
     private PromptParts buildQueryPromptParts(QueryUnderstandingContext context) {

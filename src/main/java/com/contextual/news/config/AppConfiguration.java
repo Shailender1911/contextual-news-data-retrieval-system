@@ -38,7 +38,7 @@ public class AppConfiguration {
                 .addHandlerLast(new WriteTimeoutHandler(timeoutMillis, TimeUnit.MILLISECONDS)));
 
         return WebClient.builder()
-            .baseUrl(properties.llm().getBaseUrl())
+            .baseUrl(properties.llm().getResolvedBaseUrl())
             .clientConnector(new ReactorClientHttpConnector(httpClient))
             .exchangeStrategies(ExchangeStrategies.builder()
                 .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(2 * 1024 * 1024))
