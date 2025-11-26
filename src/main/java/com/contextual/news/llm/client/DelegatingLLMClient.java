@@ -51,19 +51,20 @@ public class DelegatingLLMClient implements LLMClient {
     @Cacheable(value = "query-understanding", key = "#context.query() + ':' + #context.latitude() + ':' + #context.longitude()")
     public ParsedQuery parseQuery(QueryUnderstandingContext context) {
         if (!properties.llm().isEnabled()) {
-            log.debug("LLM disabled or API key missing; using rule-based parser");
+            log.info("LLM disabled or provider configuration missing; using rule-based parser");
             return fallback.parseQuery(context);
         }
         try {
-            log.debug("Invoking {} provider for query understanding", properties.llm().getProvider());
+            log.info("Invoking {} provider for query understanding", properties.llm().getProvider());
             PromptParts prompt = buildQueryPromptParts(context);
             JsonNode content = executeForJson(prompt, buildQuerySchema());
             ParsedQuery parsed = parseQueryContent(content);
             if (parsed != null) {
+                log.info("LLM parsed intents={}, filters={}", parsed.intents(), parsed.filters());
                 return parsed;
             }
         } catch (Exception ex) {
-            log.warn("{} query parsing failed, falling back", properties.llm().getProvider(), ex);
+            log.warn("{} query parsing failed, falling back to rule-based parser", properties.llm().getProvider(), ex);
         }
         return fallback.parseQuery(context).withFallback();
     }
@@ -75,16 +76,17 @@ public class DelegatingLLMClient implements LLMClient {
             return fallback.generateEnrichment(request);
         }
         try {
-            log.debug("Invoking {} provider for article enrichment of {}", properties.llm().getProvider(),
+            log.info("Invoking {} provider for article enrichment of {}", properties.llm().getProvider(),
                 request.article().getId());
             PromptParts prompt = buildEnrichmentPromptParts(request);
             JsonNode content = executeForJson(prompt, buildEnrichmentSchema());
             ArticleEnrichment enrichment = parseEnrichmentContent(content);
             if (enrichment != null && !enrichment.isEmpty()) {
+                log.info("LLM enrichment summary generated for article {}", request.article().getId());
                 return enrichment;
             }
         } catch (Exception ex) {
-            log.warn("{} enrichment failed, using fallback", properties.llm().getProvider(), ex);
+            log.warn("{} enrichment failed, using fallback generator", properties.llm().getProvider(), ex);
         }
         return fallback.generateEnrichment(request);
     }
@@ -156,11 +158,11 @@ public class DelegatingLLMClient implements LLMClient {
 
     private String executeForString(PromptParts prompt, ObjectNode schema) {
         if (isOllama()) {
-            log.debug("Calling Ollama /api/chat at {}", properties.llm().getBaseUrl());
+            log.info("Calling Ollama /api/chat at {}", properties.llm().getBaseUrl());
             JsonNode response = callOllamaChat(prompt);
             return extractOllamaContent(response);
         }
-        log.debug("Calling OpenAI-compatible /responses endpoint at {}", properties.llm().getBaseUrl());
+        log.info("Calling OpenAI-compatible /responses endpoint at {}", properties.llm().getBaseUrl());
         JsonNode response = callOpenAi(buildOpenAiRequest(prompt, schema));
         return extractOpenAiContent(response);
     }
