@@ -50,7 +50,7 @@ public class DelegatingLLMClient implements LLMClient {
     @Override
     @Cacheable(value = "query-understanding", key = "#context.query() + ':' + #context.latitude() + ':' + #context.longitude()")
     public ParsedQuery parseQuery(QueryUnderstandingContext context) {
-        if (!properties.llm().isEnabled()) {
+        if (!isProviderEnabled()) {
             log.info("LLM disabled or provider configuration missing; using rule-based parser");
             return fallback.parseQuery(context);
         }
@@ -72,7 +72,8 @@ public class DelegatingLLMClient implements LLMClient {
     @Override
     @Cacheable(value = "article-enrichment", key = "#request.article().id")
     public ArticleEnrichment generateEnrichment(EnrichmentRequest request) {
-        if (!properties.llm().isEnabled()) {
+        if (!isProviderEnabled()) {
+            log.info("LLM disabled or provider configuration missing; using rule-based enrichment");
             return fallback.generateEnrichment(request);
         }
         try {
@@ -169,6 +170,30 @@ public class DelegatingLLMClient implements LLMClient {
 
     private boolean isOllama() {
         return PROVIDER_OLLAMA.equalsIgnoreCase(properties.llm().getProvider());
+    }
+
+    private boolean isProviderEnabled() {
+        if (!properties.llm().isEnabled()) {
+            return false;
+        }
+        if (!hasValidProviderConfiguration()) {
+            log.warn("LLM provider configuration incomplete; falling back to rule-based behaviour");
+            return false;
+        }
+        return true;
+    }
+
+    private boolean hasValidProviderConfiguration() {
+        AppProperties.LlmProperties llm = properties.llm();
+        String provider = llm.getProvider();
+        if (provider == null || provider.isBlank()) {
+            return false;
+        }
+        if (PROVIDER_OLLAMA.equalsIgnoreCase(provider)) {
+            return llm.getBaseUrl() != null && !llm.getBaseUrl().isBlank();
+        }
+        return llm.getBaseUrl() != null && !llm.getBaseUrl().isBlank()
+            && llm.getApiKey() != null && !llm.getApiKey().isBlank();
     }
 
     private PromptParts buildQueryPromptParts(QueryUnderstandingContext context) {
