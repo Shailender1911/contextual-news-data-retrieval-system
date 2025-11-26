@@ -55,6 +55,7 @@ public class DelegatingLLMClient implements LLMClient {
             return fallback.parseQuery(context);
         }
         try {
+            log.debug("Invoking {} provider for query understanding", properties.llm().getProvider());
             PromptParts prompt = buildQueryPromptParts(context);
             JsonNode content = executeForJson(prompt, buildQuerySchema());
             ParsedQuery parsed = parseQueryContent(content);
@@ -74,6 +75,8 @@ public class DelegatingLLMClient implements LLMClient {
             return fallback.generateEnrichment(request);
         }
         try {
+            log.debug("Invoking {} provider for article enrichment of {}", properties.llm().getProvider(),
+                request.article().getId());
             PromptParts prompt = buildEnrichmentPromptParts(request);
             JsonNode content = executeForJson(prompt, buildEnrichmentSchema());
             ArticleEnrichment enrichment = parseEnrichmentContent(content);
@@ -153,9 +156,11 @@ public class DelegatingLLMClient implements LLMClient {
 
     private String executeForString(PromptParts prompt, ObjectNode schema) {
         if (isOllama()) {
+            log.debug("Calling Ollama /api/chat at {}", properties.llm().getBaseUrl());
             JsonNode response = callOllamaChat(prompt);
             return extractOllamaContent(response);
         }
+        log.debug("Calling OpenAI-compatible /responses endpoint at {}", properties.llm().getBaseUrl());
         JsonNode response = callOpenAi(buildOpenAiRequest(prompt, schema));
         return extractOpenAiContent(response);
     }
