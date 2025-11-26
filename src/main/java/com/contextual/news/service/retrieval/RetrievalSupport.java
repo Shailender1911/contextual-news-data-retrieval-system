@@ -31,9 +31,6 @@ public final class RetrievalSupport {
         if (filters.scoreThreshold() != null) {
             spec = spec.and(ArticleSpecifications.hasMinimumScore(filters.scoreThreshold()));
         }
-        if (parsedQuery.searchQuery() != null && !parsedQuery.searchQuery().isBlank()) {
-            spec = spec.and(ArticleSpecifications.matchesSearchTerm(parsedQuery.searchQuery()));
-        }
         if (filters.dateFrom() != null) {
             spec = spec.and(ArticleSpecifications.publishedAfter(filters.dateFrom()));
         }
@@ -90,5 +87,12 @@ public final class RetrievalSupport {
         ParsedQuery parsedQuery = context.parsedQuery();
         NewsQueryRequest request = context.request();
         return Optional.ofNullable(parsedQuery.filters().radiusKm()).orElseGet(request::resolvedRadiusKm);
+    }
+
+    public static Specification<NewsArticle> applySearchTerm(Specification<NewsArticle> spec, String searchQuery) {
+        if (searchQuery == null || searchQuery.isBlank()) {
+            return spec;
+        }
+        return spec.and(ArticleSpecifications.matchesSearchTerm(searchQuery));
     }
 }

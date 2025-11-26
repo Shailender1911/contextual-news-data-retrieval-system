@@ -40,6 +40,7 @@ public class SearchRetrievalStrategy implements ArticleRetrievalStrategy {
         }
         Specification<NewsArticle> spec = RetrievalSupport.baseSpecification(parsed);
         spec = RetrievalSupport.applyNearbyBoundingBox(context, spec);
+        spec = RetrievalSupport.applySearchTerm(spec, searchQuery);
         return repository.findAll(spec, RetrievalSupport.pageable(limit)).stream()
             .map(article -> new RetrievedArticle(article, strategyName(), article.getRelevanceScore() != null ? article.getRelevanceScore() : 0.0))
             .collect(Collectors.toList());
