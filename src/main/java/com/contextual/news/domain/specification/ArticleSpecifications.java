@@ -1,15 +1,21 @@
 package com.contextual.news.domain.specification;
 
 import com.contextual.news.domain.model.NewsArticle;
+import com.contextual.news.domain.model.NewsArticle;
 import jakarta.persistence.criteria.Predicate;
 import jakarta.persistence.criteria.SetJoin;
 import java.time.OffsetDateTime;
-import java.util.Arrays;
-import java.util.stream.Stream;
-
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 import org.springframework.data.jpa.domain.Specification;
 
 public final class ArticleSpecifications {
+
+    private static final Set<String> STOP_WORDS = Set.of(
+        "news", "latest", "today", "top", "breaking", "update", "updates", "near", "about", "around"
+    );
 
     private ArticleSpecifications() {
     }
@@ -32,21 +38,33 @@ public final class ArticleSpecifications {
 
     public static Specification<NewsArticle> matchesSearchTerm(String term) {
         return (root, query, cb) -> {
-            String normalized = term.toLowerCase();
-            String[] tokens = normalized.split("\\s+");
-            var titlePath = cb.lower(root.get("title"));
-            var descriptionPath = cb.lower(root.get("description"));
+            if (term == null || term.isBlank()) {
+                return cb.conjunction();
+            }
+            String normalized = term.toLowerCase(Locale.ENGLISH).trim();
+            Predicate titleLikePhrase = cb.like(cb.lower(root.get("title")), "%" + normalized + "%");
+            Predicate descriptionLikePhrase = cb.like(cb.lower(root.get("description")), "%" + normalized + "%");
 
-            Predicate[] predicates = Arrays.stream(tokens)
-                .filter(token -> token.length() > 2)
-                .map(token -> "%" + token + "%")
-                .flatMap(like -> Stream.of(
-                    cb.like(titlePath, like),
-                    cb.like(descriptionPath, like)
-                ))
-                .toArray(Predicate[]::new);
+            List<Predicate> tokenPredicates = new ArrayList<>();
+            for (String token : normalized.split("\\s+")) {
+                String trimmed = token.trim();
+                if (trimmed.length() < 3 || STOP_WORDS.contains(trimmed)) {
+                    continue;
+                }
+                String like = "%" + trimmed + "%";
+                tokenPredicates.add(cb.or(
+                    cb.like(cb.lower(root.get("title")), like),
+                    cb.like(cb.lower(root.get("description")), like)
+                ));
+            }
 
-            return predicates.length == 0 ? cb.conjunction() : cb.or(predicates);
+            Predicate phrasePredicate = cb.or(titleLikePhrase, descriptionLikePhrase);
+            if (tokenPredicates.isEmpty()) {
+                return phrasePredicate;
+            }
+
+            Predicate allTokens = cb.and(tokenPredicates.toArray(new Predicate[0]));
+            return cb.or(phrasePredicate, allTokens);
         };
     }
 
