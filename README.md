@@ -30,18 +30,40 @@ It was built with Maven, PostgreSQL (with PostGIS-like geo queries expressed in 
 All defaults live in `src/main/resources/application.properties`. Key settings:
 
 ```properties
-spring.datasource.url=jdbc:postgresql://localhost:5432/contextual_news
-spring.datasource.username=contextual_news
-spring.datasource.password=contextual_news
+spring.datasource.url=${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/contextual_news}
+spring.datasource.username=${SPRING_DATASOURCE_USERNAME:contextual_news}
+spring.datasource.password=${SPRING_DATASOURCE_PASSWORD:contextual_news}
 spring.sql.init.mode=always
 app.data.file-path=classpath:data/news_data.json
 app.data.bootstrap-enabled=true
-app.llm.provider=openai
-app.llm.api-key=
-app.llm.enabled=false
+app.llm.provider=${APP_LLM_PROVIDER:openai}
+app.llm.base-url=${APP_LLM_BASE_URL:https://api.openai.com/v1}
+app.llm.model=${APP_LLM_MODEL:gpt-4o-mini}
+app.llm.api-key=${APP_LLM_API_KEY:}
+app.llm.enabled=${APP_LLM_ENABLED:false}
 ```
 
-> To use a real OpenAI (or compatible) endpoint, supply `app.llm.api-key` and flip `app.llm.enabled=true` via environment variables or an override `application-local.properties`.
+- Set configuration overrides via environment variables (shown above with `${…}`) or a profile-specific `application-*.properties`.
+- Keep all API tokens or device keys secret. Never commit them to git.
+- To use OpenAI (or any OpenAI-compatible cloud), export `APP_LLM_PROVIDER=openai`, `APP_LLM_BASE_URL=https://api.openai.com/v1`, `APP_LLM_API_KEY=<token>`, and `APP_LLM_ENABLED=true`.
+
+### Enabling a local Ollama model (no API key required)
+
+1. Install [Ollama](https://ollama.com/) and ensure the service is running (`ollama serve`).  
+2. Pull a JSON-friendly chat model, for example:
+   ```bash
+   ollama pull llama3.1
+   ```
+3. Launch the Spring Boot app with the following environment overrides:
+   ```bash
+   export APP_LLM_PROVIDER=ollama
+   export APP_LLM_BASE_URL=http://localhost:11434
+   export APP_LLM_MODEL=llama3.1
+   export APP_LLM_ENABLED=true
+   ./mvnw spring-boot:run
+   ```
+4. The application now routes query understanding and article enrichment to Ollama’s `/api/chat` endpoint.  
+   The rule-based fallback still kicks in automatically if Ollama is unavailable or returns malformed JSON.
 
 ## Startup Instructions
 

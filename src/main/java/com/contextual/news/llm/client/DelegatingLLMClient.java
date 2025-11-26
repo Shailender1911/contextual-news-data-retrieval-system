@@ -7,7 +7,6 @@ import com.contextual.news.service.dto.EnrichmentRequest;
 import com.contextual.news.service.dto.QueryUnderstandingContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -30,6 +29,7 @@ import reactor.core.publisher.Mono;
 public class DelegatingLLMClient implements LLMClient {
 
     private static final Logger log = LoggerFactory.getLogger(DelegatingLLMClient.class);
+    private static final String PROVIDER_OLLAMA = "ollama";
 
     private final AppProperties properties;
     private final WebClient webClient;
@@ -54,13 +54,14 @@ public class DelegatingLLMClient implements LLMClient {
             return fallback.parseQuery(context);
         }
         try {
-            JsonNode response = callOpenAi(buildQueryPrompt(context));
-            ParsedQuery parsed = parseQueryResponse(response);
+            PromptParts prompt = buildQueryPromptParts(context);
+            JsonNode content = executeForJson(prompt, buildQuerySchema());
+            ParsedQuery parsed = parseQueryContent(content);
             if (parsed != null) {
                 return parsed;
             }
         } catch (Exception ex) {
-            log.warn("OpenAI query parsing failed, falling back", ex);
+            log.warn("{} query parsing failed, falling back", properties.llm().getProvider(), ex);
         }
         return fallback.parseQuery(context).withFallback();
     }
@@ -72,19 +73,19 @@ public class DelegatingLLMClient implements LLMClient {
             return fallback.generateEnrichment(request);
         }
         try {
-            JsonNode response = callOpenAi(buildEnrichmentPrompt(request));
-            ArticleEnrichment enrichment = parseEnrichmentResponse(response);
+            PromptParts prompt = buildEnrichmentPromptParts(request);
+            JsonNode content = executeForJson(prompt, buildEnrichmentSchema());
+            ArticleEnrichment enrichment = parseEnrichmentContent(content);
             if (enrichment != null && !enrichment.isEmpty()) {
                 return enrichment;
             }
         } catch (Exception ex) {
-            log.warn("OpenAI enrichment failed, using fallback", ex);
+            log.warn("{} enrichment failed, using fallback", properties.llm().getProvider(), ex);
         }
         return fallback.generateEnrichment(request);
     }
 
-    private ArticleEnrichment parseEnrichmentResponse(JsonNode response) {
-        JsonNode content = extractContentNode(response);
+    private ArticleEnrichment parseEnrichmentContent(JsonNode content) {
         if (content == null) {
             return null;
         }
@@ -98,8 +99,7 @@ public class DelegatingLLMClient implements LLMClient {
             whyRelevant != null ? whyRelevant.asText(null) : null);
     }
 
-    private ParsedQuery parseQueryResponse(JsonNode response) {
-        JsonNode content = extractContentNode(response);
+    private ParsedQuery parseQueryContent(JsonNode content) {
         if (content == null) {
             return null;
         }
@@ -137,41 +137,33 @@ public class DelegatingLLMClient implements LLMClient {
         return ParsedQuery.create(entities, concepts, intents, filters, searchQuery, false);
     }
 
-    private JsonNode extractContentNode(JsonNode response) {
-        if (response == null) {
+    private JsonNode executeForJson(PromptParts prompt, ObjectNode schema) {
+        String raw = executeForString(prompt, schema);
+        if (raw == null || raw.isBlank()) {
             return null;
         }
-        JsonNode output = response.path("output");
-        if (output.isArray() && output.size() > 0) {
-            JsonNode first = output.get(0);
-            JsonNode content = first.path("content");
-            if (content.isArray() && content.size() > 0) {
-                JsonNode firstContent = content.get(0);
-                if (firstContent.has("text")) {
-                    try {
-                        return objectMapper.readTree(firstContent.get("text").asText());
+        try {
+            return objectMapper.readTree(raw);
                     } catch (Exception ex) {
-                        log.warn("Failed to parse content text as JSON", ex);
-                    }
-                }
-            }
+            log.warn("Failed to parse LLM content as JSON: {}", raw, ex);
+            return null;
         }
-        return null;
     }
 
-    private JsonNode callOpenAi(Object body) {
-        return webClient.post()
-            .uri("/responses")
-            .header(HttpHeaders.AUTHORIZATION, "Bearer " + properties.llm().getApiKey())
-            .contentType(MediaType.APPLICATION_JSON)
-            .body(BodyInserters.fromValue(body))
-            .retrieve()
-            .bodyToMono(JsonNode.class)
-            .onErrorResume(throwable -> Mono.error(new IllegalStateException("OpenAI call failed", throwable)))
-            .block();
+    private String executeForString(PromptParts prompt, ObjectNode schema) {
+        if (isOllama()) {
+            JsonNode response = callOllamaChat(prompt);
+            return extractOllamaContent(response);
+        }
+        JsonNode response = callOpenAi(buildOpenAiRequest(prompt, schema));
+        return extractOpenAiContent(response);
     }
 
-    private Object buildQueryPrompt(QueryUnderstandingContext context) {
+    private boolean isOllama() {
+        return PROVIDER_OLLAMA.equalsIgnoreCase(properties.llm().getProvider());
+    }
+
+    private PromptParts buildQueryPromptParts(QueryUnderstandingContext context) {
         String systemPrompt = "You are an AI that extracts structured filters and intent from news search queries.";
         StringBuilder userPrompt = new StringBuilder("Query: \"").append(context.query()).append("\"\n");
         if (context.latitude() != null && context.longitude() != null) {
@@ -180,20 +172,11 @@ public class DelegatingLLMClient implements LLMClient {
         if (context.radiusKm() != null) {
             userPrompt.append("Radius hint: ").append(context.radiusKm()).append(" km\n");
         }
-        userPrompt.append("Return JSON matching the schema.");
-
-        ObjectNode root = objectMapper.createObjectNode();
-        root.put("model", properties.llm().getModel());
-        root.set("response_format", buildQuerySchema());
-
-        ArrayNode inputArray = objectMapper.createArrayNode();
-        inputArray.add(roleContentNode("system", systemPrompt));
-        inputArray.add(roleContentNode("user", userPrompt.toString()));
-        root.set("input", inputArray);
-        return root;
+        userPrompt.append("Return only compact JSON following the agreed schema.");
+        return new PromptParts(systemPrompt, userPrompt.toString());
     }
 
-    private Object buildEnrichmentPrompt(EnrichmentRequest request) {
+    private PromptParts buildEnrichmentPromptParts(EnrichmentRequest request) {
         String systemPrompt = "You summarize news articles in concise bullet points.";
         StringBuilder userPrompt = new StringBuilder();
         userPrompt.append("Article Title: ").append(request.article().getTitle()).append('\n');
@@ -202,13 +185,54 @@ public class DelegatingLLMClient implements LLMClient {
         if (request.userLatitude() != null && request.userLongitude() != null) {
             userPrompt.append("User location available for relevance explanation.\n");
         }
+        userPrompt.append("Return only JSON containing summary, key_entities, and why_relevant.");
+        return new PromptParts(systemPrompt, userPrompt.toString());
+    }
 
+    private JsonNode callOpenAi(Object body) {
+        return webClient.post()
+            .uri("/responses")
+            .headers(headers -> {
+                if (properties.llm().getApiKey() != null && !properties.llm().getApiKey().isBlank()) {
+                    headers.set(HttpHeaders.AUTHORIZATION, "Bearer " + properties.llm().getApiKey());
+                }
+            })
+            .contentType(MediaType.APPLICATION_JSON)
+            .body(BodyInserters.fromValue(body))
+            .retrieve()
+            .bodyToMono(JsonNode.class)
+            .onErrorResume(throwable -> Mono.error(new IllegalStateException("LLM call failed", throwable)))
+            .block();
+    }
+
+    private JsonNode callOllamaChat(PromptParts prompt) {
+        ObjectNode body = objectMapper.createObjectNode();
+        body.put("model", properties.llm().getModel());
+        body.put("stream", false);
+        var messages = objectMapper.createArrayNode();
+        messages.add(chatMessage("system", prompt.systemPrompt()));
+        messages.add(chatMessage("user", prompt.userPrompt()));
+        body.set("messages", messages);
+
+        return webClient.post()
+            .uri("/api/chat")
+            .contentType(MediaType.APPLICATION_JSON)
+            .body(BodyInserters.fromValue(body))
+            .retrieve()
+            .bodyToMono(JsonNode.class)
+            .onErrorResume(throwable -> Mono.error(new IllegalStateException("Ollama call failed", throwable)))
+            .block();
+    }
+
+    private Object buildOpenAiRequest(PromptParts prompt, ObjectNode schema) {
         ObjectNode root = objectMapper.createObjectNode();
         root.put("model", properties.llm().getModel());
-        root.set("response_format", buildEnrichmentSchema());
-        ArrayNode inputArray = objectMapper.createArrayNode();
-        inputArray.add(roleContentNode("system", systemPrompt));
-        inputArray.add(roleContentNode("user", userPrompt.toString()));
+        if (schema != null) {
+            root.set("response_format", schema);
+        }
+        var inputArray = objectMapper.createArrayNode();
+        inputArray.add(roleContentNode("system", prompt.systemPrompt()));
+        inputArray.add(roleContentNode("user", prompt.userPrompt()));
         root.set("input", inputArray);
         return root;
     }
@@ -216,12 +240,19 @@ public class DelegatingLLMClient implements LLMClient {
     private ObjectNode roleContentNode(String role, String text) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("role", role);
-        ArrayNode contentArray = objectMapper.createArrayNode();
+        var contentArray = objectMapper.createArrayNode();
         ObjectNode textNode = objectMapper.createObjectNode();
         textNode.put("type", "text");
         textNode.put("text", text);
         contentArray.add(textNode);
         node.set("content", contentArray);
+        return node;
+    }
+
+    private ObjectNode chatMessage(String role, String content) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("role", role);
+        node.put("content", content);
         return node;
     }
 
@@ -315,5 +346,40 @@ public class DelegatingLLMClient implements LLMClient {
             }
         }
         return values;
+    }
+
+    private String extractOpenAiContent(JsonNode response) {
+        if (response == null) {
+            return null;
+        }
+        JsonNode output = response.path("output");
+        if (output.isArray() && output.size() > 0) {
+            JsonNode first = output.get(0);
+            JsonNode content = first.path("content");
+            if (content.isArray() && content.size() > 0) {
+                JsonNode firstContent = content.get(0);
+                if (firstContent.has("text")) {
+                    return firstContent.get("text").asText(null);
+                }
+            }
+        }
+        return null;
+    }
+
+    private String extractOllamaContent(JsonNode response) {
+        if (response == null) {
+            return null;
+        }
+        JsonNode message = response.path("message");
+        if (message.has("content")) {
+            return message.get("content").asText(null);
+        }
+        if (response.has("response")) {
+            return response.get("response").asText(null);
+        }
+        return null;
+    }
+
+    private record PromptParts(String systemPrompt, String userPrompt) {
     }
 }

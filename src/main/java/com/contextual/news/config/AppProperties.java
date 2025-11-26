@@ -117,7 +117,13 @@ public class AppProperties {
         }
 
         public boolean isEnabled() {
-            return enabled && apiKey != null && !apiKey.isBlank();
+            if (!enabled) {
+                return false;
+            }
+            if ("ollama".equalsIgnoreCase(provider)) {
+                return baseUrl != null && !baseUrl.isBlank();
+            }
+            return apiKey != null && !apiKey.isBlank();
         }
 
         public void setEnabled(boolean enabled) {
