@@ -50,6 +50,9 @@ public class DelegatingLLMClient implements LLMClient {
     @Override
     @Cacheable(value = "query-understanding", key = "#context.query() + ':' + #context.latitude() + ':' + #context.longitude()")
     public ParsedQuery parseQuery(QueryUnderstandingContext context) {
+        log.debug("LLM configuration resolved: provider={}, baseUrl={}, enabledFlag={}, isEnabledComputed={}",
+            properties.llm().getProvider(), properties.llm().getBaseUrl(), properties.llm().isEnabled(),
+            isProviderEnabled());
         if (!isProviderEnabled()) {
             log.info("LLM disabled or provider configuration missing; using rule-based parser");
             return fallback.parseQuery(context);
