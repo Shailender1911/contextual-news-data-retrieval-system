@@ -54,7 +54,15 @@ app.llm.enabled=${APP_LLM_ENABLED:false}
    ```bash
    ollama pull llama3.1
    ```
-3. Launch the Spring Boot app with the following environment overrides:
+3. Launch the Spring Boot app with the Ollama profile (recommended):
+   ```bash
+   export JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-17.jdk/Contents/Home
+   export PATH="$JAVA_HOME/bin:$PATH"
+   SPRING_PROFILES_ACTIVE=ollama ./mvnw spring-boot:run
+   ```
+   The `application-ollama.properties` profile sets `app.llm.provider=ollama`, `app.llm.base-url=http://localhost:11434`, and `app.llm.model=llama3.1`. You can still override any of them via environment variables (e.g. `APP_LLM_MODEL`).
+
+   Alternatively, set the overrides explicitly without using profiles:
    ```bash
    export APP_LLM_PROVIDER=ollama
    export APP_LLM_BASE_URL=http://localhost:11434
