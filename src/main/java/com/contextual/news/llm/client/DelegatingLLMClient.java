@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.Iterator;
@@ -273,6 +274,7 @@ public class DelegatingLLMClient implements LLMClient {
     }
 
     private JsonNode callOpenAi(Object body) {
+        Duration timeout = properties.llm().getRequestTimeout();
         return webClient.post()
             .uri("/responses")
             .headers(headers -> {
@@ -284,6 +286,7 @@ public class DelegatingLLMClient implements LLMClient {
             .body(BodyInserters.fromValue(body))
             .retrieve()
             .bodyToMono(JsonNode.class)
+            .timeout(timeout)
             .onErrorResume(throwable -> Mono.error(new IllegalStateException("LLM call failed", throwable)))
             .block();
     }
@@ -296,13 +299,14 @@ public class DelegatingLLMClient implements LLMClient {
         messages.add(chatMessage("system", prompt.systemPrompt()));
         messages.add(chatMessage("user", prompt.userPrompt()));
         body.set("messages", messages);
-
+        Duration timeout = properties.llm().getRequestTimeout();
         return webClient.post()
             .uri("/api/chat")
             .contentType(MediaType.APPLICATION_JSON)
             .body(BodyInserters.fromValue(body))
             .retrieve()
             .bodyToMono(JsonNode.class)
+            .timeout(timeout)
             .onErrorResume(throwable -> Mono.error(new IllegalStateException("Ollama call failed", throwable)))
             .block();
     }

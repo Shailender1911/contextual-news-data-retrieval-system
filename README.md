@@ -1,220 +1,199 @@
 # Contextual News Data Retrieval System
 
-## Overview
+Context-aware backend that:
 
-This Spring Boot 3 (Java 17) service ingests a corpus of news articles, understands natural‑language queries with an LLM, retrieves relevant documents using multiple strategies, ranks the results, enriches them, and returns a structured JSON response.  
-It was built with Maven, PostgreSQL (with PostGIS-like geo queries expressed in JPA), Caffeine caching, and Flyway-style SQL bootstrapping.
+- Ingests ~2K news articles from JSON into PostgreSQL.
+- Uses an LLM (Ollama by default, OpenAI-compatible optionally) to understand user queries.
+- Supports direct “virtual” endpoints (category, score, source, search, nearby).
+- Computes an **event-driven trending feed** using simulated user activity and serves it via `/api/v1/news/trending`.
+- Enriches top articles with LLM-generated summaries and key entities.
+- Caches LLM outputs and trending feeds for predictable latency even when the model is slow or offline.
 
-## Architecture Highlights
+---
 
-- **Hexagonal layering**
-  - `api`: request/response DTOs, controller, global exception handler
-  - `service`: query orchestration, retrieval strategies, ranking, enrichment
-  - `domain`: JPA entities, repositories, specifications
-  - `infrastructure`: configuration, data bootstrap, LLM clients
-- **LLM integration**: `DelegatingLLMClient` with a rule-based fallback parses intents (category, score, search, source, nearby), extracts entities/concepts, and generates enrichment snippets.
-- **Retrieval strategies** (`ArticleRetrievalStrategy`) implement the required “virtual endpoints”: category, score, search, source, nearby.
-- **Ranking**: blends stored relevance score, recency, proximity, and semantic hints into a final score.
-- **Caching**: Caffeine caches query understanding and enrichment calls.
-- **Data bootstrap**: `NewsDataLoader` loads `src/main/resources/data/news_data.json` on startup when the database is empty.
+## 1. Architecture Overview
 
-## Prerequisites
+| Layer | Responsibilities | Key Types |
+|-------|------------------|-----------|
+| **API (`api.*`)** | REST controllers, DTOs, exception handlers. | `NewsController`, `NewsQueryRequest`, `NewsQueryResponse`, `TrendingResponse` |
+| **Service (`service.*`)** | LLM delegation, retrieval strategies, ranking, enrichment, trending/event processing. | `NewsQueryService`, `ArticleResponseAssembler`, `TrendingService`, retrieval strategy implementations |
+| **Domain (`domain.*`)** | JPA entities and repositories for articles, categories, and trending aggregates. | `NewsArticle`, `ArticleTrendAggregate`, repositories |
+| **Infrastructure** | App configuration, caching, WebClient configuration, bootstrap loader. | `AppConfiguration`, `AppProperties`, `NewsDataLoader`, Flyway-style SQL scripts |
 
-- Java 17 (`export JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-17.jdk/Contents/Home`)
-- Maven Wrapper (`./mvnw`)
-- Docker (optional for PostgreSQL via Compose; we verified against a local Postgres 14 instance)
-- PostgreSQL 14+ with the `contextual_news` database and user/password `contextual_news`
+### Retrieval & Ranking
+- Five strategies implement `ArticleRetrievalStrategy` (`category`, `score`, `source`, `search`, `nearby`).
+- `ArticleRankingService` blends relevance score, recency, semantic boost, and proximity.
 
-## Configuration
+### LLM Integration & Fallback
+- `DelegatingLLMClient` chooses Ollama (`/api/chat`) or OpenAI `/responses` endpoints based on config.
+- 10 second client-side timeout; failures trigger `RuleBasedLLMClient` fallback so responses stay consistent.
+- Summaries & query understanding cached via Caffeine.
 
-All defaults live in `src/main/resources/application.properties`. Key settings:
+### Trending Feed
+- Simulated user events (VIEW/CLICK/SHARE) update `article_trend_aggregate`.
+- Scores decay exponentially (half-life 6h) and are bucketed by geohash-like tiles.
+- `/api/v1/news/trending` composes top articles near the requested location, caches per geo bucket.
 
-```properties
-spring.datasource.url=${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/contextual_news}
-spring.datasource.username=${SPRING_DATASOURCE_USERNAME:contextual_news}
-spring.datasource.password=${SPRING_DATASOURCE_PASSWORD:contextual_news}
-spring.sql.init.mode=always
-app.data.file-path=classpath:data/news_data.json
-app.data.bootstrap-enabled=true
-app.llm.provider=${APP_LLM_PROVIDER:openai}
-app.llm.base-url=${APP_LLM_BASE_URL:https://api.openai.com/v1}
-app.llm.model=${APP_LLM_MODEL:gpt-4o-mini}
-app.llm.api-key=${APP_LLM_API_KEY:}
-app.llm.enabled=${APP_LLM_ENABLED:false}
-```
+---
 
-- Set configuration overrides via environment variables (shown above with `${…}`) or a profile-specific `application-*.properties`.
-- Keep all API tokens or device keys secret. Never commit them to git.
-- To use OpenAI (or any OpenAI-compatible cloud), export `APP_LLM_PROVIDER=openai`, `APP_LLM_BASE_URL=https://api.openai.com/v1`, `APP_LLM_API_KEY=<token>`, and `APP_LLM_ENABLED=true`.
+## 2. Data Model
 
-### Enabling a local Ollama model (no API key required)
+| Table | Purpose | Notes |
+|-------|---------|-------|
+| `news_article` | Main article catalog (title, description, relevance score, lat/lon, text search vector). | Indexed by `publication_date`, `relevance_score`, and full-text `tsvector`. |
+| `article_category` | Join table mapping UUID → categories. | Many-to-many simplified as `text[]`. |
+| `article_trend_aggregate` | Stores decayed trending score per `(bucket_id, article_id)`. | Updated on every event; queried when building feeds. |
 
-1. Install [Ollama](https://ollama.com/) and ensure the service is running (`ollama serve`).  
-2. Pull a JSON-friendly chat model, for example:
-   ```bash
-   ollama pull llama3.1
-   ```
-3. Launch the Spring Boot app with the Ollama profile (recommended):
-   ```bash
-   export JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-17.jdk/Contents/Home
-   export PATH="$JAVA_HOME/bin:$PATH"
-   SPRING_PROFILES_ACTIVE=ollama ./mvnw spring-boot:run
-   ```
-   The `application-ollama.properties` profile sets `app.llm.provider=ollama`, `app.llm.base-url=http://localhost:11434`, and `app.llm.model=llama3.1`. You can still override any of them via environment variables (e.g. `APP_LLM_MODEL`).
+Flyway-style migrations live under `src/main/resources/db/migration/`:
+- `V1__create_article_tables.sql`
+- `V2__create_trending_tables.sql`
 
-   Alternatively, set the overrides explicitly without using profiles:
-   ```bash
-   export APP_LLM_PROVIDER=ollama
-   export APP_LLM_BASE_URL=http://localhost:11434
-   export APP_LLM_MODEL=llama3.1
-   export APP_LLM_ENABLED=true
-   ./mvnw spring-boot:run
-   ```
-4. The application now routes query understanding and article enrichment to Ollama’s `/api/chat` endpoint.  
-   The rule-based fallback still kicks in automatically if Ollama is unavailable or returns malformed JSON.
+---
 
-## Startup Instructions
-
-1. Ensure PostgreSQL is running and accessible at `localhost:5432` with the credentials above.
-2. (Optional) Create the DB/user if missing:
-   ```bash
-   createdb contextual_news
-   psql -d contextual_news -c "CREATE USER contextual_news WITH PASSWORD 'contextual_news';"
-   psql -d contextual_news -c "GRANT ALL PRIVILEGES ON DATABASE contextual_news TO contextual_news;"
-   ```
-3. From the project root:
-   ```bash
-   export JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-17.jdk/Contents/Home
-   export PATH="$JAVA_HOME/bin:$PATH"
-   ./mvnw clean package   # optional full build
-   ./mvnw spring-boot:run
-   ```
-4. On first launch, the loader ingests ~2000 articles and logs `Ingested 2000 news articles`.
-5. Verify health: `curl http://localhost:8080/actuator/health`
-
-## API Documentation
-
-Single public endpoint: `POST /api/v1/news/query`  
-Content-Type: `application/json`
-
-### Request Body
-
-```json
-{
-  "query": "natural language text describing desired news",
-  "userLocation": {
-    "latitude": 37.7749,
-    "longitude": -122.4194
-  },
-  "maxResults": 10,
-  "radiusKm": 25,
-  "scoreThreshold": 0.7
-}
-```
-
-- `query` (required): free text the LLM uses to derive intents, entities, concepts.
-- `userLocation` (optional): enables nearby intent.
-- `maxResults` default 10 (hard capped at 50).
-- `radiusKm` optional; defaults to 10 km when nearby intent is detected.
-- `scoreThreshold` optional; activates score filter when provided or inferred.
-
-### Response Body (excerpt)
-
-```json
-{
-  "metadata": {
-    "intents": ["category", "search"],
-    "entities": ["Reuters"],
-    "concepts": ["technology", "news", "from", "reuters"],
-    "filters": {
-      "category": "technology",
-      "source": "Reuters",
-      "scoreThreshold": null,
-      "radiusKm": null,
-      "latitude": null,
-      "longitude": null,
-      "dateFrom": null,
-      "dateTo": null
-    },
-    "llmFallbackUsed": false
-  },
-  "articles": [
-    {
-      "id": "52d7b2b7-bb29-4549-a0a7-bd2e19da71cc",
-      "title": "Secretive Chinese tech firm trying to recruit ...",
-      "sourceName": "Reuters",
-      "categories": ["world", "technology"],
-      "relevanceScore": 0.58,
-      "finalScore": 0.2244,
-      "distanceKm": null,
-      "matchReason": "category",
-      "enrichment": {
-        "summary": "Short LLM-generated synopsis …",
-        "keyEntities": ["Secretive Chinese", "Report", "Chinese"],
-        "whyRelevant": "Matched by category. Highlights: …"
-      }
-    }
-  ]
-}
-```
-
-- `metadata` captures LLM output and the actual filters in play.
-- `articles` sorted by `finalScore`, include enrichment data and optional `distanceKm`.
-
-### Sample cURL Requests
+## 3. Getting Started
 
 ```bash
-# Technology category
-curl -s -X POST http://localhost:8080/api/v1/news/query \
-  -H "Content-Type: application/json" \
-  -d '{"query":"Latest technology news","maxResults":3}' | jq
+# 1. Database bootstrap (PostgreSQL 14+)
+createdb contextual_news
+psql -d contextual_news -c "CREATE USER contextual_news WITH PASSWORD 'contextual_news';"
+psql -d contextual_news -c "GRANT ALL PRIVILEGES ON DATABASE contextual_news TO contextual_news;"
 
-# Source-specific
-curl -s -X POST http://localhost:8080/api/v1/news/query \
-  -H "Content-Type: application/json" \
-  -d '{"query":"news from Reuters","maxResults":2}' | jq
+# 2. Run the service
+export JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-17.jdk/Contents/Home
+./mvnw spring-boot:run
 
-# Score threshold
-curl -s -X POST http://localhost:8080/api/v1/news/query \
-  -H "Content-Type: application/json" \
-  -d '{"query":"high scoring articles","scoreThreshold":0.85,"maxResults":3}' | jq
-
-# Nearby (bonus)
-curl -s -X POST http://localhost:8080/api/v1/news/query \
-  -H "Content-Type: application/json" \
-  -d '{"query":"latest news near my location","userLocation":{"latitude":16.2,"longitude":77.1},"radiusKm":50,"maxResults":3}' | jq
+# 3. Health check
+curl http://localhost:8080/actuator/health
 ```
 
-## Testing
+On first startup `NewsDataLoader` ingests the JSON fixture into the database.  
+By default the app uses local **Ollama** (`llama3.1`); set `APP_LLM_ENABLED=false` to force rule-based parsing.
 
-- Unit + integration tests run via `./mvnw test`
-- A Testcontainers-based integration test (`NewsQueryIntegrationTest`) spins up PostgreSQL (requires Docker).
-- JaCoCo is configured for coverage reporting during `mvn verify`.
+---
 
-## Deployment Notes
+## 4. Configuration Cheat Sheet
 
-- Dockerfile and docker-compose examples are included (see `docker/` if present) to launch Postgres + app together.
-- Enable external LLM usage by supplying a key; otherwise the RuleBased LLM client provides deterministic parsing/enrichment.
+```properties
+# application.properties (defaults)
+app.llm.provider=${APP_LLM_PROVIDER:ollama}
+app.llm.base-url=${APP_LLM_BASE_URL:http://localhost:11434}
+app.llm.model=${APP_LLM_MODEL:llama3.1}
+app.llm.enabled=${APP_LLM_ENABLED:true}
+app.llm.request-timeout=${APP_LLM_TIMEOUT:PT10S}
 
-## What Was Implemented
+app.enrichment.top-n=${APP_ENRICH_MAX:5}
+app.enrichment.cache-ttl=PT15M
 
-1. **Database schema & ingestion**: Flyway-style SQL script creates tables and indexes; bootstrap loader ingests JSON on first run.
-2. **LLM parsing and enrichment**: Delegating client calls OpenAI-compatible API or uses fallback; enriched summaries cached via Caffeine.
-3. **Retrieval strategies**: category, score, source, search, nearby strategies selectable based on parsed intent.
-4. **Ranking**: `ArticleRankingService` mixes relevance score, recency decay, semantic hints, and location proximity.
-5. **REST API**: single `/api/v1/news/query` endpoint returning aggregated metadata + article list.
-6. **Documentation & samples**: this README, cURL examples, and optional Postman/cURL snippets for manual testing.
+app.trending.simulation-delay-ms=${APP_TRENDING_SIM_DELAY:30000}
+```
 
-## Next Steps / Manual Push
+- **OpenAI-compatible mode**  
+  `export APP_LLM_PROVIDER=openai`  
+  `export APP_LLM_BASE_URL=https://api.openai.com/v1`  
+  `export APP_LLM_MODEL=gpt-4o-mini`  
+  `export APP_LLM_API_KEY=<token>`  
+  `export APP_LLM_ENABLED=true`
+- **Disable LLM entirely**: `export APP_LLM_ENABLED=false` (rule-based parser & summarizer keep working).
 
-All code and documentation are local. To push to your GitHub repository:
+---
+
+## 5. API Reference
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/news/query` | LLM-assisted pipeline chooses the best retrieval strategy automatically. |
+| `GET` | `/api/v1/news/category?category=Technology&limit=5` | Direct category filter (no LLM call). |
+| `GET` | `/api/v1/news/source?source=Reuters&limit=5` | Filter by publisher/source. |
+| `GET` | `/api/v1/news/score?threshold=0.8&limit=5` | Articles above a relevance score threshold. |
+| `GET` | `/api/v1/news/search?query=Elon+Musk+Twitter&limit=5` | Full-text search across title + description. |
+| `GET` | `/api/v1/news/nearby?lat=37.42&lon=-122.08&radiusKm=15&limit=5` | Geo filter using Haversine distance. |
+| `GET` | `/api/v1/news/trending?lat=37.42&lon=-122.08&limit=5` | Location-sensitive trending feed derived from user events. |
+| `POST` | `/api/v1/news/trending/events` | Ingest a user interaction event (VIEW/CLICK/SHARE). Accepts JSON body. |
+
+### 5.1 LLM-Assisted Query
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/news/query \
+  -H "Content-Type: application/json" \
+  -d '{
+        "query": "Latest developments in the Elon Musk Twitter acquisition near Palo Alto",
+        "userLocation": { "latitude": 37.4, "longitude": -122.1 },
+        "maxResults": 5
+      }' | jq
+```
+
+### 5.2 Direct Endpoints (no LLM cost)
+
+```bash
+# Category
+curl -s "http://localhost:8080/api/v1/news/category?category=Technology&limit=3" | jq
+
+# Score
+curl -s "http://localhost:8080/api/v1/news/score?threshold=0.9&limit=3" | jq
+
+# Search
+curl -s "http://localhost:8080/api/v1/news/search?query=IIT+Kanpur+latest+news&limit=3" | jq
+
+# Nearby
+curl -s "http://localhost:8080/api/v1/news/nearby?lat=28.61&lon=77.23&radiusKm=25&limit=3" | jq
+```
+
+### 5.3 Trending Feed
+
+```bash
+# What's trending near Mountain View?
+curl -s "http://localhost:8080/api/v1/news/trending?lat=37.4220&lon=-122.0840&limit=5" | jq
+
+# Inject a synthetic CLICK event (optional)
+curl -s -X POST http://localhost:8080/api/v1/news/trending/events \
+  -H "Content-Type: application/json" \
+  -d '{
+        "eventType": "CLICK",
+        "articleId": "204f91d7-8dfe-4816-a6af-6ed9ebc53117",
+        "userLocation": { "latitude": 37.42, "longitude": -122.08 }
+      }'
+```
+
+Metadata in the response indicates whether the feed was served from cache and which geo bucket was used.
+
+---
+
+## 6. Trending Algorithm Primer
+
+1. **Event ingestion**: `TrendingService.recordEvent` upserts `(bucketId, articleId)` rows in `article_trend_aggregate`, applying exponential decay (`λ = ln(2)/360min`).
+2. **Scoring**: trending score = decayed sum of weighted events (VIEW=1, CLICK=3, SHARE=5).
+3. **Geo bucketing**: coordinates are snapped to ~55 km tiles; `/trending` inspects the tile plus neighbours within the requested radius.
+4. **Feed assembly**: top-N scored articles are enriched (summary/key entities) and cached for 60 s keyed by `(bucket, radius, limit)`.
+5. **Simulation**: `TrendingEventSimulator` periodically generates random events so the feed always contains data even without real traffic. Disable or tune via `APP_TRENDING_SIM_DELAY`.
+
+---
+
+## 7. Tests
+
+```bash
+./mvnw test
+```
+
+- Lightweight unit tests run in-memory.
+- `NewsQueryIntegrationTest` spins up PostgreSQL via Testcontainers if Docker is available; otherwise it is skipped with a warning.
+
+---
+
+## 8. Deployment & Future Enhancements
+
+- Deploy alongside PostgreSQL (and optionally Redis if you move caches out of process).
+- Replace simulated events with real analytics (web/mobile instrumentation).
+- Extend trending buckets to use H3 or QuadKeys for finer control.
+- Add pagination, OpenAPI/Swagger docs, and authentication hooks around `/api/v1/news/**`.
+
+---
+
+## 9. Contributing / Pushing
 
 ```bash
 git add .
-git commit -m "Complete contextual news data retrieval system"
+git commit -m "Implement contextual news retrieval + trending feed"
 git push origin <branch>
 ```
 
-Provide credentials/personal access token when prompted.
-
-
+Use a GitHub personal access token when prompted. All endpoints listed above are now implemented and covered by automated tests. Happy demoing!

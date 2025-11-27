@@ -51,12 +51,19 @@ public class AppConfiguration {
         SimpleCacheManager cacheManager = new SimpleCacheManager();
         cacheManager.setCaches(List.of(
             new CaffeineCache("query-understanding", Caffeine.newBuilder()
+                .recordStats()
                 .expireAfterWrite(Duration.ofHours(6))
                 .maximumSize(1_000)
                 .build()),
             new CaffeineCache("article-enrichment", Caffeine.newBuilder()
+                .recordStats()
                 .expireAfterWrite(properties.enrichment().getCacheTtl())
                 .maximumSize(5_000)
+                .build()),
+            new CaffeineCache("trending-feed", Caffeine.newBuilder()
+                .recordStats()
+                .expireAfterWrite(Duration.ofSeconds(60))
+                .maximumSize(2_000)
                 .build())
         ));
         return cacheManager;
